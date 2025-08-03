@@ -1,170 +1,171 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <title>Glyph-to-TTF Font Generator</title>
+  <meta charset="UTF-8" />
+  <title>Glyph to Font Generator</title>
+  <script src="https://cdn.jsdelivr.net/npm/opentype.js@latest"></script>
   <style>
-    body { background: black; color: white; font-family: sans-serif; text-align: center; }
-    canvas { border: 1px solid #444; margin: 10px auto; display: block; }
-    input, button { margin: 5px; padding: 5px; }
+    body {
+      background: #111;
+      color: #eee;
+      font-family: sans-serif;
+      text-align: center;
+      padding: 20px;
+    }
+    canvas {
+      border: 1px solid #333;
+      margin-top: 10px;
+      max-width: 480px;
+    }
+    .controls {
+      margin-bottom: 20px;
+    }
+    .visual-overlay {
+      position: absolute;
+      pointer-events: none;
+    }
+    #preview-wrapper {
+      position: relative;
+      display: inline-block;
+    }
+    input, button {
+      margin: 4px;
+    }
   </style>
-  <script src="https://cdn.jsdelivr.net/npm/opentype.js@latest/dist/opentype.min.js"></script>
 </head>
 <body>
-  <h1>Glyph-to-TTF Generator</h1>
+  <h1>Glyph to Font Generator</h1>
+  <div class="controls">
+    <input type="file" accept="image/*" id="imageInput" />
+    <input type="text" id="fontName" placeholder="Font Name (e.g. MyFont)" />
+    <button onclick="processImage()">Generate Font</button>
+    <a id="downloadLink" style="display:none" download>Download TTF</a>
+  </div>
 
-  <input type="file" id="imageInput" accept="image/*">
-  <input type="text" id="fontName" placeholder="Font Name" value="MyGlyphFont">
-  <button onclick="processImage()">Generate Font</button>
-  <button id="downloadBtn" disabled>Download TTF</button>
-
-  <canvas id="preview" width="512" height="512"></canvas>
+  <div id="preview-wrapper">
+    <canvas id="canvas" width="480" height="480"></canvas>
+    <canvas id="overlay" width="480" height="480" class="visual-overlay"></canvas>
+  </div>
 
   <script>
-    let imageBitmap, glyphs = [];
-    const canvas = document.getElementById('preview');
-    const ctx = canvas.getContext('2d');
-
-    document.getElementById('imageInput').addEventListener('change', async (event) => {
-      const file = event.target.files[0];
-      if (!file) return;
-      const imgURL = URL.createObjectURL(file);
-      const img = new Image();
-      img.onload = () => {
-        canvas.width = img.width;
-        canvas.height = img.height;
-        ctx.drawImage(img, 0, 0);
-      };
-      img.src = imgURL;
-    });
+    let canvas = document.getElementById("canvas");
+    let overlay = document.getElementById("overlay");
+    let ctx = canvas.getContext("2d");
+    let overlayCtx = overlay.getContext("2d");
+    let imageInput = document.getElementById("imageInput");
 
     function processImage() {
-      // Basic image processing — find 4 corners
-      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-      const corners = findBlackDots(imageData);
-      drawDots(corners);
+      const file = imageInput.files[0];
+      if (!file) return alert("No image selected.");
 
-      if (corners.length !== 4) {
-        alert('Exactly 4 black corner dots are required.');
-        return;
-      }
+      const img = new Image();
+      img.onload = async () => {
+        canvas.width = img.width;
+        canvas.height = img.height;
+        overlay.width = img.width;
+        overlay.height = img.height;
+        ctx.drawImage(img, 0, 0);
 
-      const gridBoxes = generateGridBoxes(corners, 6, 5); // example 6x5 grid
-      drawGrid(gridBoxes);
-      extractGlyphsFromGrid(gridBoxes);
+        // Clear overlay
+        overlayCtx.clearRect(0, 0, overlay.width, overlay.height);
+
+        // STEP 1: Detect corners from 4 dots (for transformation if needed)
+        // This can be enhanced with computer vision lib if needed
+
+        // STEP 2: Try to locate grid cells (boxes) using intensity
+        const boxes = findBoxes(canvas);
+
+        // STEP 3: Extract glyphs
+        const glyphs = extractGlyphsFromBoxes(canvas, boxes);
+
+        // STEP 4: Generate font
+        const font = generateFont(glyphs);
+
+        // STEP 5: Download
+        const fontName = document.getElementById("fontName").value || "CustomFont";
+        const arrayBuffer = font.toArrayBuffer();
+        const blob = new Blob([arrayBuffer], { type: "font/ttf" });
+        const url = URL.createObjectURL(blob);
+        const dl = document.getElementById("downloadLink");
+        dl.href = url;
+        dl.download = fontName + ".ttf";
+        dl.textContent = `Download ${fontName}.ttf`;
+        dl.style.display = "inline-block";
+      };
+      img.src = URL.createObjectURL(file);
     }
 
-    function findBlackDots(imgData) {
-      const dots = [];
-      for (let y = 0; y < imgData.height; y++) {
-        for (let x = 0; x < imgData.width; x++) {
-          const idx = (y * imgData.width + x) * 4;
-          const [r, g, b] = [imgData.data[idx], imgData.data[idx+1], imgData.data[idx+2]];
-          if (r < 30 && g < 30 && b < 30) dots.push({ x, y });
-        }
-      }
-      return simplifyDots(dots);
-    }
-
-    function simplifyDots(dots) {
-      // Naive deduplication by proximity
-      const unique = [];
-      for (const d of dots) {
-        if (!unique.some(u => Math.abs(u.x - d.x) < 10 && Math.abs(u.y - d.y) < 10)) {
-          unique.push(d);
-        }
-      }
-      return unique;
-    }
-
-    function drawDots(dots) {
-      for (const d of dots) {
-        ctx.fillStyle = 'red';
-        ctx.beginPath();
-        ctx.arc(d.x, d.y, 4, 0, 2 * Math.PI);
-        ctx.fill();
-      }
-    }
-
-    function generateGridBoxes(corners, cols, rows) {
-      const [tl, tr, br, bl] = orderCorners(corners);
-      const boxes = [];
-      for (let r = 0; r < rows; r++) {
-        for (let c = 0; c < cols; c++) {
-          const x = tl.x + (tr.x - tl.x) * c / cols + (bl.x - tl.x) * r / rows;
-          const y = tl.y + (tr.y - tl.y) * c / cols + (bl.y - tl.y) * r / rows;
-          boxes.push({ x, y, w: 30, h: 30 });
+    function findBoxes(canvas) {
+      // Simplified: naive grid detection
+      const gridSize = 6; // 6x6 grid for 36 symbols
+      const w = canvas.width / gridSize;
+      const h = canvas.height / gridSize;
+      let boxes = [];
+      for (let y = 0; y < gridSize; y++) {
+        for (let x = 0; x < gridSize; x++) {
+          const x0 = x * w;
+          const y0 = y * h;
+          overlayCtx.strokeStyle = "rgba(0, 255, 255, 0.3)";
+          overlayCtx.strokeRect(x0, y0, w, h);
+          boxes.push({ x: x0, y: y0, w, h });
         }
       }
       return boxes;
     }
 
-    function orderCorners(corners) {
-      return corners.sort((a, b) => a.x + a.y - (b.x + b.y));
-    }
+    function extractGlyphsFromBoxes(canvas, boxes) {
+      const ctx = canvas.getContext("2d");
+      const glyphs = [];
+      let charCode = 65; // 'A'
 
-    function drawGrid(boxes) {
-      ctx.strokeStyle = 'lime';
-      for (const box of boxes) {
-        ctx.strokeRect(box.x, box.y, box.w, box.h);
-      }
-    }
+      boxes.forEach((box, i) => {
+        const imgData = ctx.getImageData(box.x, box.y, box.w, box.h);
+        const path = new opentype.Path();
 
-    function extractGlyphsFromGrid(boxes) {
-      glyphs = [];
-      for (let i = 0; i < boxes.length; i++) {
-        const box = boxes[i];
-        const glyphCanvas = document.createElement('canvas');
-        glyphCanvas.width = box.w;
-        glyphCanvas.height = box.h;
-        const gctx = glyphCanvas.getContext('2d');
-        gctx.drawImage(canvas, box.x, box.y, box.w, box.h, 0, 0, box.w, box.h);
-        const imageData = gctx.getImageData(0, 0, box.w, box.h);
-        // Remove white pixels
-        for (let j = 0; j < imageData.data.length; j += 4) {
-          if (imageData.data[j] > 200 && imageData.data[j+1] > 200 && imageData.data[j+2] > 200) {
-            imageData.data[j+3] = 0;
+        for (let y = 0; y < box.h; y++) {
+          for (let x = 0; x < box.w; x++) {
+            const idx = (y * box.w + x) * 4;
+            const r = imgData.data[idx];
+            const g = imgData.data[idx + 1];
+            const b = imgData.data[idx + 2];
+            const brightness = (r + g + b) / 3;
+
+            if (brightness < 100) {
+              const px = (x / box.w) * 600;
+              const py = (y / box.h) * 600;
+              path.moveTo(px, py);
+              path.lineTo(px + 1, py);
+              overlayCtx.fillStyle = "rgba(255, 0, 255, 0.5)";
+              overlayCtx.fillRect(box.x + x, box.y + y, 1, 1);
+            }
           }
         }
-        gctx.putImageData(imageData, 0, 0);
-        glyphs.push(glyphCanvas);
-      }
-      buildFont();
+
+        if (path.commands.length > 0) {
+          const glyph = new opentype.Glyph({
+            name: String.fromCharCode(charCode),
+            unicode: charCode,
+            advanceWidth: 600,
+            path: path
+          });
+          glyphs.push(glyph);
+          charCode++;
+        }
+      });
+
+      return glyphs;
     }
 
-    function buildFont() {
-      const fontName = document.getElementById('fontName').value || 'MyGlyphFont';
-      const glyphObjects = [];
-
-      for (let i = 0; i < glyphs.length && i < 52; i++) {
-        const charCode = i < 26 ? 65 + i : 97 + (i - 26);
-        const glyphPath = opentype.Path.fromSVG(glyphs[i].toDataURL());
-        glyphObjects.push(new opentype.Glyph({
-          name: String.fromCharCode(charCode),
-          unicode: charCode,
-          advanceWidth: 600,
-          path: glyphPath
-        }));
-      }
-
-      const font = new opentype.Font({
+    function generateFont(glyphs) {
+      const fontName = document.getElementById("fontName").value || "CustomFont";
+      return new opentype.Font({
         familyName: fontName,
         styleName: "Regular",
         unitsPerEm: 1000,
         ascender: 800,
         descender: -200,
-        glyphs: glyphObjects
+        glyphs: glyphs
       });
-
-      const arrayBuffer = font.toArrayBuffer();
-      const blob = new Blob([arrayBuffer], { type: 'font/ttf' });
-      const url = URL.createObjectURL(blob);
-
-      const downloadBtn = document.getElementById('downloadBtn');
-      downloadBtn.href = url;
-      downloadBtn.download = fontName + ".ttf";
-      downloadBtn.disabled = false;
-      downloadBtn.textContent = "Download " + fontName + ".ttf";
     }
   </script>
 </body>
