@@ -2,108 +2,169 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Glyph to Font Generator</title>
+  <title>Glyph-to-TTF Font Generator</title>
   <style>
     body { background: black; color: white; font-family: sans-serif; text-align: center; }
-    canvas { border: 1px solid #444; margin: 10px 0; }
-    #preview { position: relative; display: inline-block; }
-    #overlay { position: absolute; left: 0; top: 0; pointer-events: none; }
+    canvas { border: 1px solid #444; margin: 10px auto; display: block; }
+    input, button { margin: 5px; padding: 5px; }
   </style>
+  <script src="https://cdn.jsdelivr.net/npm/opentype.js@latest/dist/opentype.min.js"></script>
 </head>
 <body>
-  <h1>Glyph to Font Generator</h1>
-  <input type="file" accept="image/*" id="fileInput"><br>
-  <button onclick="processImage()">Process</button><br>
-  <div id="preview">
-    <canvas id="canvas"></canvas>
-    <canvas id="overlay"></canvas>
-  </div>
+  <h1>Glyph-to-TTF Generator</h1>
+
+  <input type="file" id="imageInput" accept="image/*">
+  <input type="text" id="fontName" placeholder="Font Name" value="MyGlyphFont">
+  <button onclick="processImage()">Generate Font</button>
+  <button id="downloadBtn" disabled>Download TTF</button>
+
+  <canvas id="preview" width="512" height="512"></canvas>
+
   <script>
-    const canvas = document.getElementById("canvas");
-    const overlay = document.getElementById("overlay");
-    const ctx = canvas.getContext("2d");
-    const octx = overlay.getContext("2d");
-    let image;
+    let imageBitmap, glyphs = [];
+    const canvas = document.getElementById('preview');
+    const ctx = canvas.getContext('2d');
+
+    document.getElementById('imageInput').addEventListener('change', async (event) => {
+      const file = event.target.files[0];
+      if (!file) return;
+      const imgURL = URL.createObjectURL(file);
+      const img = new Image();
+      img.onload = () => {
+        canvas.width = img.width;
+        canvas.height = img.height;
+        ctx.drawImage(img, 0, 0);
+      };
+      img.src = imgURL;
+    });
 
     function processImage() {
-      const file = document.getElementById("fileInput").files[0];
-      if (!file) return alert("No file selected.");
-      const reader = new FileReader();
-      reader.onload = e => {
-        image = new Image();
-        image.onload = () => {
-          canvas.width = image.width;
-          canvas.height = image.height;
-          overlay.width = image.width;
-          overlay.height = image.height;
-          ctx.drawImage(image, 0, 0);
-          detectDotsAndGrid();
-        };
-        image.src = e.target.result;
-      };
-      reader.readAsDataURL(file);
+      // Basic image processing — find 4 corners
+      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      const corners = findBlackDots(imageData);
+      drawDots(corners);
+
+      if (corners.length !== 4) {
+        alert('Exactly 4 black corner dots are required.');
+        return;
+      }
+
+      const gridBoxes = generateGridBoxes(corners, 6, 5); // example 6x5 grid
+      drawGrid(gridBoxes);
+      extractGlyphsFromGrid(gridBoxes);
     }
 
-    async function detectDotsAndGrid() {
-      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-      const data = imageData.data;
-      const blackPoints = [];
+    function findBlackDots(imgData) {
+      const dots = [];
+      for (let y = 0; y < imgData.height; y++) {
+        for (let x = 0; x < imgData.width; x++) {
+          const idx = (y * imgData.width + x) * 4;
+          const [r, g, b] = [imgData.data[idx], imgData.data[idx+1], imgData.data[idx+2]];
+          if (r < 30 && g < 30 && b < 30) dots.push({ x, y });
+        }
+      }
+      return simplifyDots(dots);
+    }
 
-      for (let y = 0; y < canvas.height; y++) {
-        for (let x = 0; x < canvas.width; x++) {
-          const i = (y * canvas.width + x) * 4;
-          const [r, g, b] = [data[i], data[i+1], data[i+2]];
-          if (r < 50 && g < 50 && b < 50) {
-            blackPoints.push({x, y});
+    function simplifyDots(dots) {
+      // Naive deduplication by proximity
+      const unique = [];
+      for (const d of dots) {
+        if (!unique.some(u => Math.abs(u.x - d.x) < 10 && Math.abs(u.y - d.y) < 10)) {
+          unique.push(d);
+        }
+      }
+      return unique;
+    }
+
+    function drawDots(dots) {
+      for (const d of dots) {
+        ctx.fillStyle = 'red';
+        ctx.beginPath();
+        ctx.arc(d.x, d.y, 4, 0, 2 * Math.PI);
+        ctx.fill();
+      }
+    }
+
+    function generateGridBoxes(corners, cols, rows) {
+      const [tl, tr, br, bl] = orderCorners(corners);
+      const boxes = [];
+      for (let r = 0; r < rows; r++) {
+        for (let c = 0; c < cols; c++) {
+          const x = tl.x + (tr.x - tl.x) * c / cols + (bl.x - tl.x) * r / rows;
+          const y = tl.y + (tr.y - tl.y) * c / cols + (bl.y - tl.y) * r / rows;
+          boxes.push({ x, y, w: 30, h: 30 });
+        }
+      }
+      return boxes;
+    }
+
+    function orderCorners(corners) {
+      return corners.sort((a, b) => a.x + a.y - (b.x + b.y));
+    }
+
+    function drawGrid(boxes) {
+      ctx.strokeStyle = 'lime';
+      for (const box of boxes) {
+        ctx.strokeRect(box.x, box.y, box.w, box.h);
+      }
+    }
+
+    function extractGlyphsFromGrid(boxes) {
+      glyphs = [];
+      for (let i = 0; i < boxes.length; i++) {
+        const box = boxes[i];
+        const glyphCanvas = document.createElement('canvas');
+        glyphCanvas.width = box.w;
+        glyphCanvas.height = box.h;
+        const gctx = glyphCanvas.getContext('2d');
+        gctx.drawImage(canvas, box.x, box.y, box.w, box.h, 0, 0, box.w, box.h);
+        const imageData = gctx.getImageData(0, 0, box.w, box.h);
+        // Remove white pixels
+        for (let j = 0; j < imageData.data.length; j += 4) {
+          if (imageData.data[j] > 200 && imageData.data[j+1] > 200 && imageData.data[j+2] > 200) {
+            imageData.data[j+3] = 0;
           }
         }
+        gctx.putImageData(imageData, 0, 0);
+        glyphs.push(glyphCanvas);
+      }
+      buildFont();
+    }
+
+    function buildFont() {
+      const fontName = document.getElementById('fontName').value || 'MyGlyphFont';
+      const glyphObjects = [];
+
+      for (let i = 0; i < glyphs.length && i < 52; i++) {
+        const charCode = i < 26 ? 65 + i : 97 + (i - 26);
+        const glyphPath = opentype.Path.fromSVG(glyphs[i].toDataURL());
+        glyphObjects.push(new opentype.Glyph({
+          name: String.fromCharCode(charCode),
+          unicode: charCode,
+          advanceWidth: 600,
+          path: glyphPath
+        }));
       }
 
-      // Naive approach to find 4 extremal dots
-      const topLeft = blackPoints.reduce((a, b) => (a.x + a.y < b.x + b.y ? a : b));
-      const topRight = blackPoints.reduce((a, b) => (b.x - b.y > a.x - a.y ? b : a));
-      const bottomLeft = blackPoints.reduce((a, b) => (b.y - b.x > a.y - a.x ? b : a));
-      const bottomRight = blackPoints.reduce((a, b) => (a.x + a.y > b.x + b.y ? a : b));
-
-      octx.clearRect(0, 0, overlay.width, overlay.height);
-      [topLeft, topRight, bottomRight, bottomLeft].forEach(p => {
-        octx.beginPath();
-        octx.arc(p.x, p.y, 5, 0, 2 * Math.PI);
-        octx.fillStyle = "red";
-        octx.fill();
+      const font = new opentype.Font({
+        familyName: fontName,
+        styleName: "Regular",
+        unitsPerEm: 1000,
+        ascender: 800,
+        descender: -200,
+        glyphs: glyphObjects
       });
 
-      // Define grid
-      const rows = 6, cols = 6;
-      for (let row = 0; row < rows; row++) {
-        for (let col = 0; col < cols; col++) {
-          const x = topLeft.x + ((topRight.x - topLeft.x) / cols) * col;
-          const y = topLeft.y + ((bottomLeft.y - topLeft.y) / rows) * row;
-          const boxWidth = (topRight.x - topLeft.x) / cols;
-          const boxHeight = (bottomLeft.y - topLeft.y) / rows;
+      const arrayBuffer = font.toArrayBuffer();
+      const blob = new Blob([arrayBuffer], { type: 'font/ttf' });
+      const url = URL.createObjectURL(blob);
 
-          octx.strokeStyle = "lime";
-          octx.strokeRect(x, y, boxWidth, boxHeight);
-
-          const box = ctx.getImageData(x, y, boxWidth, boxHeight);
-          const blob = new Blob([box.data.buffer], {type: 'application/octet-stream'});
-          const formData = new FormData();
-          const canvasRegion = document.createElement("canvas");
-          canvasRegion.width = boxWidth;
-          canvasRegion.height = boxHeight;
-          canvasRegion.getContext("2d").putImageData(box, 0, 0);
-          canvasRegion.toBlob(async blob => {
-            formData.append("file", blob, "glyph.png");
-            const response = await fetch("/api/ocr", {
-              method: "POST",
-              body: formData
-            });
-            const result = await response.json();
-            octx.fillStyle = "cyan";
-            octx.fillText(result.text || "?", x + 2, y + 12);
-          });
-        }
-      }
+      const downloadBtn = document.getElementById('downloadBtn');
+      downloadBtn.href = url;
+      downloadBtn.download = fontName + ".ttf";
+      downloadBtn.disabled = false;
+      downloadBtn.textContent = "Download " + fontName + ".ttf";
     }
   </script>
 </body>
