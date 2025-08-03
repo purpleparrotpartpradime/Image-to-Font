@@ -1,0 +1,40 @@
+name: OCR Proxy API
+
+on:
+  workflow_dispatch:
+
+jobs:
+  ocr_proxy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '20'
+      - name: Install Dependencies
+        run: npm install express multer node-fetch
+      - name: Start Proxy Server
+        run: |
+          echo "const express = require('express');
+          const multer = require('multer');
+          const fetch = require('node-fetch');
+          const app = express();
+          const upload = multer();
+
+          app.post('/api/ocr', upload.single('file'), async (req, res) => {
+            const form = new FormData();
+            form.append('apikey', '${{ secrets.OCR }}');
+            form.append('isOverlayRequired', 'false');
+            form.append('language', 'eng');
+            form.append('file', req.file.buffer, 'glyph.png');
+            const ocrRes = await fetch('https://api.ocr.space/parse/image', {
+              method: 'POST',
+              body: form
+            });
+            const data = await ocrRes.json();
+            const text = data?.ParsedResults?.[0]?.ParsedText || '';
+            res.json({ text });
+          });
+
+          app.listen(3000, () => console.log('OCR Proxy running on port 3000'));" > server.js
+          node server.js
