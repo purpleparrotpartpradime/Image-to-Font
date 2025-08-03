@@ -55,32 +55,8 @@
     let overlayCtx = overlay.getContext("2d");
     let imageInput = document.getElementById("imageInput");
     let downloadButton = document.getElementById("downloadButton");
-    let clickPoints = [];
     let fontBlobUrl = null;
     let originalImage = null;
-
-    // Handle user clicks to place search dots
-    canvas.addEventListener("click", (e) => {
-      if (clickPoints.length >= 4) return;
-      const rect = canvas.getBoundingClientRect();
-      const x = (e.clientX - rect.left) * (canvas.width / rect.width);
-      const y = (e.clientY - rect.top) * (canvas.height / rect.height);
-      clickPoints.push({ x, y });
-      drawSearchCircles();
-      if (clickPoints.length === 4) {
-        processImageAfterClicks();
-      }
-    });
-
-    function drawSearchCircles() {
-      overlayCtx.clearRect(0, 0, overlay.width, overlay.height);
-      clickPoints.forEach(point => {
-        overlayCtx.beginPath();
-        overlayCtx.arc(point.x, point.y, 20, 0, 2 * Math.PI); // Radius in original image pixels
-        overlayCtx.strokeStyle = "rgba(255, 255, 0, 0.5)";
-        overlayCtx.stroke();
-      });
-    }
 
     function processImage() {
       const file = imageInput.files[0];
@@ -93,46 +69,25 @@
         overlay.width = originalImage.width;
         overlay.height = originalImage.height;
         ctx.drawImage(originalImage, 0, 0);
-        clickPoints = [];
-        drawSearchCircles();
-        alert("Click 4 points on the canvas to place search dots near the corner dots.");
+
+        // STEP 1: Detect content bounding box and grid
+        const bounds = detectContentBounds(canvas);
+        const boxes = findBoxes(canvas, bounds);
+
+        // STEP 2: Extract glyphs
+        const glyphs = extractGlyphsFromBoxes(canvas, boxes);
+
+        // STEP 3: Generate font
+        const font = generateFont(glyphs);
+
+        // STEP 4: Prepare download
+        const fontName = document.getElementById("fontName").value || "CustomFont";
+        const arrayBuffer = font.toArrayBuffer();
+        const blob = new Blob([arrayBuffer], { type: "font/ttf" });
+        fontBlobUrl = URL.createObjectURL(blob);
+        downloadButton.style.display = "inline-block";
       };
       originalImage.src = URL.createObjectURL(file);
-    }
-
-    function processImageAfterClicks() {
-      // STEP 1: Detect corners within search circles
-      const corners = detectCorners(canvas, clickPoints);
-      if (corners.length !== 4) {
-        alert("Could not detect exactly one dot in each of the 4 search circles.");
-        clickPoints = [];
-        drawSearchCircles();
-        return;
-      }
-
-      // Verify rectangle/square within 21% margin
-      if (!isRectangle(corners)) {
-        alert("Corners do not form a valid rectangle or square within 21% margin.");
-        clickPoints = [];
-        drawSearchCircles();
-        return;
-      }
-
-      // STEP 2: Locate grid cells using detected corners
-      const boxes = findBoxes(canvas, corners);
-
-      // STEP 3: Extract glyphs
-      const glyphs = extractGlyphsFromBoxes(canvas, boxes);
-
-      // STEP 4: Generate font
-      const font = generateFont(glyphs);
-
-      // STEP 5: Prepare download
-      const fontName = document.getElementById("fontName").value || "CustomFont";
-      const arrayBuffer = font.toArrayBuffer();
-      const blob = new Blob([arrayBuffer], { type: "font/ttf" });
-      fontBlobUrl = URL.createObjectURL(blob);
-      downloadButton.style.display = "inline-block";
     }
 
     function downloadFont() {
@@ -146,134 +101,57 @@
       document.body.removeChild(dl);
     }
 
-    function detectCorners(canvas, clickPoints) {
+    function detectContentBounds(canvas) {
       const ctx = canvas.getContext("2d");
       const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-      const corners = [];
+      let minX = canvas.width, minY = canvas.height, maxX = 0, maxY = 0;
 
-      clickPoints.forEach(point => {
-        let bestDot = null;
-        let maxDensity = 0;
-        const radius = 20; // Search radius in original image pixels
+      // Simple edge detection by scanning for non-background pixels
+      for (let y = 0; y < canvas.height; y++) {
+        for (let x = 0; x < canvas.width; x++) {
+          const idx = (y * canvas.width + x) * 4;
+          const r = imgData.data[idx];
+          const g = imgData.data[idx + 1];
+          const b = imgData.data[idx + 2];
+          const brightness = (r + g + b) / 3;
 
-        // Search within radius of click point
-        for (let y = Math.max(0, point.y - radius); y <= Math.min(canvas.height - 1, point.y + radius); y++) {
-          for (let x = Math.max(0, point.x - radius); x <= Math.min(canvas.width - 1, point.x + radius); x++) {
-            if (Math.hypot(x - point.x, y - point.y) > radius) continue;
-            const idx = (y * canvas.width + x) * 4;
-            const r = imgData.data[idx];
-            const g = imgData.data[idx + 1];
-            const b = imgData.data[idx + 2];
-            const brightness = (r + g + b) / 3;
-
-            if (brightness < 100) { // Relaxed threshold for dark pixels
-              let density = 0;
-              let pixelCount = 0;
-              let sumX = 0, sumY = 0;
-
-              // Check surrounding area for pixel density
-              for (let dy = -15; dy <= 15; dy++) { // Larger search area
-                for (let dx = -15; dx <= 15; dx++) {
-                  const nx = x + dx;
-                  const ny = y + dy;
-                  if (nx >= 0 && nx < canvas.width && ny >= 0 && ny < canvas.height) {
-                    const nIdx = (ny * canvas.width + nx) * 4;
-                    const nb = (imgData.data[nIdx] + imgData.data[nIdx + 1] + imgData.data[nIdx + 2]) / 3;
-                    if (nb < 120) { // Relaxed threshold for surrounding pixels
-                      pixelCount++;
-                      sumX += nx;
-                      sumY += ny;
-                    }
-                  }
-                }
-              }
-
-              // Calculate density (fraction of dark pixels in area)
-              density = pixelCount / ((15 * 2 + 1) * (15 * 2 + 1));
-              // Accept clusters with 20% margin from ideal density (0.5 for a rough dot)
-              if (density > 0.4 && density < 0.6 && density > maxDensity) {
-                maxDensity = density;
-                bestDot = { x: sumX / pixelCount, y: sumY / pixelCount, density };
-              }
-            }
+          if (brightness < 200) { // Assume non-background if not near white
+            minX = Math.min(minX, x);
+            minY = Math.min(minY, y);
+            maxX = Math.max(maxX, x);
+            maxY = Math.max(maxY, y);
           }
         }
+      }
 
-        if (bestDot) {
-          corners.push({ x: bestDot.x, y: bestDot.y });
-          // Draw detected dot on overlay
-          overlayCtx.fillStyle = "rgba(255, 255, 0, 0.5)";
-          overlayCtx.fillRect(bestDot.x - 5, bestDot.y - 5, 10, 10);
-        }
-      });
+      // Add padding and ensure bounds are valid
+      const padding = 10;
+      minX = Math.max(0, minX - padding);
+      minY = Math.max(0, minY - padding);
+      maxX = Math.min(canvas.width - 1, maxX + padding);
+      maxY = Math.min(canvas.height - 1, maxY + padding);
 
-      return corners;
-    }
-
-    function isRectangle(corners) {
-      if (corners.length !== 4) return false;
-
-      // Sort corners by y, then x to approximate top-left, top-right, bottom-left, bottom-right
-      corners.sort((a, b) => a.y === b.y ? a.x - b.x : a.y - b.y);
-      const [tl, tr, bl, br] = corners;
-
-      // Calculate side lengths
-      const top = Math.hypot(tr.x - tl.x, tr.y - tl.y);
-      const bottom = Math.hypot(br.x - bl.x, br.y - bl.y);
-      const left = Math.hypot(bl.x - tl.x, bl.y - tl.y);
-      const right = Math.hypot(br.x - tr.x, br.y - tr.y);
-
-      // Check opposite sides are equal within 21%
-      const margin = 0.21;
-      const sidesEqual = (
-        Math.abs(top - bottom) / Math.max(top, bottom) <= margin &&
-        Math.abs(left - right) / Math.max(left, right) <= margin
-      );
-
-      // Check approximate right angles using dot product
-      const v1 = { x: tr.x - tl.x, y: tr.y - tl.y }; // Top side
-      const v2 = { x: bl.x - tl.x, y: bl.y - tl.y }; // Left side
-      const dot = v1.x * v2.x + v1.y * v2.y;
-      const mag1 = Math.hypot(v1.x, v1.y);
-      const mag2 = Math.hypot(v2.x, v2.y);
-      const cosAngle = Math.abs(dot / (mag1 * mag2));
-      const isRightAngle = cosAngle < 0.21; // Cosine near 0 for 90 degrees ± 21%
-
-      // Draw rectangle on overlay
+      // Draw bounding box on overlay
       overlayCtx.strokeStyle = "rgba(0, 255, 0, 0.5)";
-      overlayCtx.beginPath();
-      overlayCtx.moveTo(tl.x, tl.y);
-      overlayCtx.lineTo(tr.x, tr.y);
-      overlayCtx.lineTo(br.x, br.y);
-      overlayCtx.lineTo(bl.x, bl.y);
-      overlayCtx.closePath();
-      overlayCtx.stroke();
+      overlayCtx.strokeRect(minX, minY, maxX - minX, maxY - minY);
 
-      return sidesEqual && isRightAngle;
+      return { minX, minY, maxX, maxY };
     }
 
-    function findBoxes(canvas, corners) {
+    function findBoxes(canvas, bounds) {
       const gridSize = 6; // 6x6 grid
       const boxes = [];
 
-      // Sort corners to get top-left, top-right, bottom-left, bottom-right
-      corners.sort((a, b) => a.y === b.y ? a.x - b.x : a.y - b.y);
-      const [tl, tr, bl, br] = corners;
-
-      // Calculate grid steps
-      const width = Math.hypot(tr.x - tl.x, tr.y - tl.y);
-      const height = Math.hypot(bl.x - tl.x, bl.y - tl.y);
+      const width = bounds.maxX - bounds.minX;
+      const height = bounds.maxY - bounds.minY;
       const wStep = width / gridSize;
       const hStep = height / gridSize;
 
-      // Interpolate grid points
+      // Create 6x6 grid within bounds
       for (let y = 0; y < gridSize; y++) {
         for (let x = 0; x < gridSize; x++) {
-          // Linear interpolation for grid points
-          const t = x / gridSize;
-          const u = y / gridSize;
-          const px = (1 - t) * ((1 - u) * tl.x + u * bl.x) + t * ((1 - u) * tr.x + u * br.x);
-          const py = (1 - t) * ((1 - u) * tl.y + u * bl.y) + t * ((1 - u) * tr.y + u * br.y);
+          const px = bounds.minX + x * wStep;
+          const py = bounds.minY + y * hStep;
           const boxW = wStep;
           const boxH = hStep;
           // Draw grid on overlay
