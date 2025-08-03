@@ -15,7 +15,7 @@
     canvas {
       border: 1px solid #333;
       margin-top: 10px;
-      max-width: 480px;
+      max-width: 300px;
     }
     .controls {
       margin-bottom: 20px;
@@ -39,12 +39,12 @@
     <input type="file" accept="image/*" id="imageInput" />
     <input type="text" id="fontName" placeholder="Font Name (e.g. MyFont)" />
     <button onclick="processImage()">Generate Font</button>
-    <a id="downloadLink" style="display:none" download>Download TTF</a>
+    <button id="downloadButton" style="display:none" onclick="downloadFont()">Download TTF</button>
   </div>
 
   <div id="preview-wrapper">
-    <canvas id="canvas" width="480" height="480"></canvas>
-    <canvas id="overlay" width="480" height="480" class="visual-overlay"></canvas>
+    <canvas id="canvas" width="300" height="300"></canvas>
+    <canvas id="overlay" width="300" height="300" class="visual-overlay"></canvas>
   </div>
 
   <script>
@@ -53,61 +53,221 @@
     let ctx = canvas.getContext("2d");
     let overlayCtx = overlay.getContext("2d");
     let imageInput = document.getElementById("imageInput");
+    let downloadLink = document.getElementById("downloadLink");
+    let downloadButton = document.getElementById("downloadButton");
+    let clickPoints = [];
+    let fontBlobUrl = null;
+
+    // Handle user clicks to place search dots
+    canvas.addEventListener("click", (e) => {
+      if (clickPoints.length >= 4) return;
+      const rect = canvas.getBoundingClientRect();
+      const scaleX = canvas.width / rect.width;
+      const scaleY = canvas.height / rect.height;
+      const x = (e.clientX - rect.left) * scaleX;
+      const y = (e.clientY - rect.top) * scaleY;
+      clickPoints.push({ x, y });
+      drawSearchCircles();
+      if (clickPoints.length === 4) {
+        processImageAfterClicks();
+      }
+    });
+
+    function drawSearchCircles() {
+      overlayCtx.clearRect(0, 0, overlay.width, overlay.height);
+      clickPoints.forEach(point => {
+        overlayCtx.beginPath();
+        overlayCtx.arc(point.x, point.y, 20, 0, 2 * Math.PI);
+        overlayCtx.strokeStyle = "rgba(255, 255, 0, 0.5)";
+        overlayCtx.stroke();
+      });
+    }
 
     function processImage() {
       const file = imageInput.files[0];
       if (!file) return alert("No image selected.");
 
       const img = new Image();
-      img.onload = async () => {
-        canvas.width = img.width;
-        canvas.height = img.height;
-        overlay.width = img.width;
-        overlay.height = img.height;
-        ctx.drawImage(img, 0, 0);
-
-        // Clear overlay
-        overlayCtx.clearRect(0, 0, overlay.width, overlay.height);
-
-        // STEP 1: Detect corners from 4 dots (for transformation if needed)
-        // This can be enhanced with computer vision lib if needed
-
-        // STEP 2: Try to locate grid cells (boxes) using intensity
-        const boxes = findBoxes(canvas);
-
-        // STEP 3: Extract glyphs
-        const glyphs = extractGlyphsFromBoxes(canvas, boxes);
-
-        // STEP 4: Generate font
-        const font = generateFont(glyphs);
-
-        // STEP 5: Download
-        const fontName = document.getElementById("fontName").value || "CustomFont";
-        const arrayBuffer = font.toArrayBuffer();
-        const blob = new Blob([arrayBuffer], { type: "font/ttf" });
-        const url = URL.createObjectURL(blob);
-        const dl = document.getElementById("downloadLink");
-        dl.href = url;
-        dl.download = fontName + ".ttf";
-        dl.textContent = `Download ${fontName}.ttf`;
-        dl.style.display = "inline-block";
+      img.onload = () => {
+        canvas.width = 300;
+        canvas.height = 300;
+        overlay.width = 300;
+        overlay.height = 300;
+        ctx.drawImage(img, 0, 0, img.width, img.height, 0, 0, canvas.width, canvas.height);
+        clickPoints = [];
+        drawSearchCircles();
+        alert("Click 4 points on the canvas to place search dots near the corner dots.");
       };
       img.src = URL.createObjectURL(file);
     }
 
-    function findBoxes(canvas) {
-      // Simplified: naive grid detection
-      const gridSize = 6; // 6x6 grid for 36 symbols
-      const w = canvas.width / gridSize;
-      const h = canvas.height / gridSize;
-      let boxes = [];
+    function processImageAfterClicks() {
+      // STEP 1: Detect corners within search circles
+      const corners = detectCorners(canvas, clickPoints);
+      if (corners.length !== 4) {
+        alert("Could not detect exactly one dot in each of the 4 search circles.");
+        clickPoints = [];
+        drawSearchCircles();
+        return;
+      }
+
+      // Verify rectangle/square within 21% margin
+      if (!isRectangle(corners)) {
+        alert("Corners do not form a valid rectangle or square within 21% margin.");
+        clickPoints = [];
+        drawSearchCircles();
+        return;
+      }
+
+      // STEP 2: Locate grid cells using detected corners
+      const boxes = findBoxes(canvas, corners);
+
+      // STEP 3: Extract glyphs
+      const glyphs = extractGlyphsFromBoxes(canvas, boxes);
+
+      // STEP 4: Generate font
+      const font = generateFont(glyphs);
+
+      // STEP 5: Prepare download
+      const fontName = document.getElementById("fontName").value || "CustomFont";
+      const arrayBuffer = font.toArrayBuffer();
+      const blob = new Blob([arrayBuffer], { type: "font/ttf" });
+      fontBlobUrl = URL.createObjectURL(blob);
+      downloadButton.style.display = "inline-block";
+    }
+
+    function downloadFont() {
+      if (!fontBlobUrl) return;
+      const fontName = document.getElementById("fontName").value || "CustomFont";
+      const dl = document.createElement("a");
+      dl.href = fontBlobUrl;
+      dl.download = fontName + ".ttf";
+      document.body.appendChild(dl);
+      dl.click();
+      document.body.removeChild(dl);
+    }
+
+    function detectCorners(canvas, clickPoints) {
+      const ctx = canvas.getContext("2d");
+      const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      const corners = [];
+
+      clickPoints.forEach(point => {
+        let bestDot = null;
+        let maxSize = 0;
+        const radius = 20;
+
+        // Search within radius of click point
+        for (let y = Math.max(0, point.y - radius); y <= Math.min(canvas.height - 1, point.y + radius); y++) {
+          for (let x = Math.max(0, point.x - radius); x <= Math.min(canvas.width - 1, point.x + radius); x++) {
+            if (Math.hypot(x - point.x, y - point.y) > radius) continue;
+            const idx = (y * canvas.width + x) * 4;
+            const r = imgData.data[idx];
+            const g = imgData.data[idx + 1];
+            const b = imgData.data[idx + 2];
+            const brightness = (r + g + b) / 3;
+
+            if (brightness < 50) { // Dark pixel
+              let size = 0;
+              for (let dy = -5; dy <= 5; dy++) {
+                for (let dx = -5; dx <= 5; dx++) {
+                  const nx = x + dx;
+                  const ny = y + dy;
+                  if (nx >= 0 && nx < canvas.width && ny >= 0 && ny < canvas.height) {
+                    const nIdx = (ny * canvas.width + nx) * 4;
+                    if (imgData.data[nIdx] + imgData.data[nIdx + 1] + imgData.data[nIdx + 2] < 150) {
+                      size++;
+                    }
+                  }
+                }
+              }
+              if (size > 20 && size < 50 && size > maxSize) {
+                maxSize = size;
+                bestDot = { x, y, size };
+              }
+            }
+          }
+        }
+
+        if (bestDot) {
+          corners.push({ x: bestDot.x, y: bestDot.y });
+          overlayCtx.fillStyle = "rgba(255, 255, 0, 0.5)";
+          overlayCtx.fillRect(bestDot.x - 5, bestDot.y - 5, 10, 10);
+        }
+      });
+
+      return corners;
+    }
+
+    function isRectangle(corners) {
+      if (corners.length !== 4) return false;
+
+      // Sort corners by y, then x to approximate top-left, top-right, bottom-left, bottom-right
+      corners.sort((a, b) => a.y === b.y ? a.x - b.x : a.y - b.y);
+      const [tl, tr, bl, br] = corners;
+
+      // Calculate side lengths
+      const top = Math.hypot(tr.x - tl.x, tr.y - tl.y);
+      const bottom = Math.hypot(br.x - bl.x, br.y - bl.y);
+      const left = Math.hypot(bl.x - tl.x, bl.y - tl.y);
+      const right = Math.hypot(br.x - tr.x, br.y - tr.y);
+
+      // Check opposite sides are equal within 21%
+      const margin = 0.21;
+      const sidesEqual = (
+        Math.abs(top - bottom) / Math.max(top, bottom) <= margin &&
+        Math.abs(left - right) / Math.max(left, right) <= margin
+      );
+
+      // Check approximate right angles using dot product
+      const v1 = { x: tr.x - tl.x, y: tr.y - tl.y }; // Top side
+      const v2 = { x: bl.x - tl.x, y: bl.y - tl.y }; // Left side
+      const dot = v1.x * v2.x + v1.y * v2.y;
+      const mag1 = Math.hypot(v1.x, v1.y);
+      const mag2 = Math.hypot(v2.x, v2.y);
+      const cosAngle = Math.abs(dot / (mag1 * mag2));
+      const isRightAngle = cosAngle < 0.21; // Cosine near 0 for 90 degrees ± 21%
+
+      // Draw rectangle on overlay
+      overlayCtx.strokeStyle = "rgba(0, 255, 0, 0.5)";
+      overlayCtx.beginPath();
+      overlayCtx.moveTo(tl.x, tl.y);
+      overlayCtx.lineTo(tr.x, tr.y);
+      overlayCtx.lineTo(br.x, br.y);
+      overlayCtx.lineTo(bl.x, bl.y);
+      overlayCtx.closePath();
+      overlayCtx.stroke();
+
+      return sidesEqual && isRightAngle;
+    }
+
+    function findBoxes(canvas, corners) {
+      const gridSize = 6; // 6x6 grid
+      const boxes = [];
+
+      // Sort corners to get top-left, top-right, bottom-left, bottom-right
+      corners.sort((a, b) => a.y === b.y ? a.x - b.x : a.y - b.y);
+      const [tl, tr, bl, br] = corners;
+
+      // Calculate grid steps
+      const width = Math.hypot(tr.x - tl.x, tr.y - tl.y);
+      const height = Math.hypot(bl.x - tl.x, bl.y - tl.y);
+      const wStep = width / gridSize;
+      const hStep = height / gridSize;
+
+      // Interpolate grid points
       for (let y = 0; y < gridSize; y++) {
         for (let x = 0; x < gridSize; x++) {
-          const x0 = x * w;
-          const y0 = y * h;
+          // Linear interpolation for grid points
+          const t = x / gridSize;
+          const u = y / gridSize;
+          const px = (1 - t) * ((1 - u) * tl.x + u * bl.x) + t * ((1 - u) * tr.x + u * br.x);
+          const py = (1 - t) * ((1 - u) * tl.y + u * bl.y) + t * ((1 - u) * tr.y + u * br.y);
+          const boxW = wStep;
+          const boxH = hStep;
           overlayCtx.strokeStyle = "rgba(0, 255, 255, 0.3)";
-          overlayCtx.strokeRect(x0, y0, w, h);
-          boxes.push({ x: x0, y: y0, w, h });
+          overlayCtx.strokeRect(px, py, boxW, boxH);
+          boxes.push({ x: px, y: py, w: boxW, h: boxH });
         }
       }
       return boxes;
