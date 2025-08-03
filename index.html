@@ -15,7 +15,8 @@
     canvas {
       border: 1px solid #333;
       margin-top: 10px;
-      max-width: 300px;
+      max-width: 90vw; /* Prevent overflow on smaller screens */
+      max-height: 90vh;
     }
     .controls {
       margin-bottom: 20px;
@@ -43,8 +44,8 @@
   </div>
 
   <div id="preview-wrapper">
-    <canvas id="canvas" width="300" height="300"></canvas>
-    <canvas id="overlay" width="300" height="300" class="visual-overlay"></canvas>
+    <canvas id="canvas"></canvas>
+    <canvas id="overlay" class="visual-overlay"></canvas>
   </div>
 
   <script>
@@ -53,19 +54,17 @@
     let ctx = canvas.getContext("2d");
     let overlayCtx = overlay.getContext("2d");
     let imageInput = document.getElementById("imageInput");
-    let downloadLink = document.getElementById("downloadLink");
     let downloadButton = document.getElementById("downloadButton");
     let clickPoints = [];
     let fontBlobUrl = null;
+    let originalImage = null;
 
     // Handle user clicks to place search dots
     canvas.addEventListener("click", (e) => {
       if (clickPoints.length >= 4) return;
       const rect = canvas.getBoundingClientRect();
-      const scaleX = canvas.width / rect.width;
-      const scaleY = canvas.height / rect.height;
-      const x = (e.clientX - rect.left) * scaleX;
-      const y = (e.clientY - rect.top) * scaleY;
+      const x = (e.clientX - rect.left) * (canvas.width / rect.width);
+      const y = (e.clientY - rect.top) * (canvas.height / rect.height);
       clickPoints.push({ x, y });
       drawSearchCircles();
       if (clickPoints.length === 4) {
@@ -77,7 +76,7 @@
       overlayCtx.clearRect(0, 0, overlay.width, overlay.height);
       clickPoints.forEach(point => {
         overlayCtx.beginPath();
-        overlayCtx.arc(point.x, point.y, 20, 0, 2 * Math.PI);
+        overlayCtx.arc(point.x, point.y, 20, 0, 2 * Math.PI); // Radius in original image pixels
         overlayCtx.strokeStyle = "rgba(255, 255, 0, 0.5)";
         overlayCtx.stroke();
       });
@@ -87,18 +86,18 @@
       const file = imageInput.files[0];
       if (!file) return alert("No image selected.");
 
-      const img = new Image();
-      img.onload = () => {
-        canvas.width = 300;
-        canvas.height = 300;
-        overlay.width = 300;
-        overlay.height = 300;
-        ctx.drawImage(img, 0, 0, img.width, img.height, 0, 0, canvas.width, canvas.height);
+      originalImage = new Image();
+      originalImage.onload = () => {
+        canvas.width = originalImage.width;
+        canvas.height = originalImage.height;
+        overlay.width = originalImage.width;
+        overlay.height = originalImage.height;
+        ctx.drawImage(originalImage, 0, 0);
         clickPoints = [];
         drawSearchCircles();
         alert("Click 4 points on the canvas to place search dots near the corner dots.");
       };
-      img.src = URL.createObjectURL(file);
+      originalImage.src = URL.createObjectURL(file);
     }
 
     function processImageAfterClicks() {
@@ -154,8 +153,8 @@
 
       clickPoints.forEach(point => {
         let bestDot = null;
-        let maxSize = 0;
-        const radius = 20;
+        let maxDensity = 0;
+        const radius = 20; // Search radius in original image pixels
 
         // Search within radius of click point
         for (let y = Math.max(0, point.y - radius); y <= Math.min(canvas.height - 1, point.y + radius); y++) {
@@ -167,23 +166,34 @@
             const b = imgData.data[idx + 2];
             const brightness = (r + g + b) / 3;
 
-            if (brightness < 50) { // Dark pixel
-              let size = 0;
-              for (let dy = -5; dy <= 5; dy++) {
-                for (let dx = -5; dx <= 5; dx++) {
+            if (brightness < 100) { // Relaxed threshold for dark pixels
+              let density = 0;
+              let pixelCount = 0;
+              let sumX = 0, sumY = 0;
+
+              // Check surrounding area for pixel density
+              for (let dy = -15; dy <= 15; dy++) { // Larger search area
+                for (let dx = -15; dx <= 15; dx++) {
                   const nx = x + dx;
                   const ny = y + dy;
                   if (nx >= 0 && nx < canvas.width && ny >= 0 && ny < canvas.height) {
                     const nIdx = (ny * canvas.width + nx) * 4;
-                    if (imgData.data[nIdx] + imgData.data[nIdx + 1] + imgData.data[nIdx + 2] < 150) {
-                      size++;
+                    const nb = (imgData.data[nIdx] + imgData.data[nIdx + 1] + imgData.data[nIdx + 2]) / 3;
+                    if (nb < 120) { // Relaxed threshold for surrounding pixels
+                      pixelCount++;
+                      sumX += nx;
+                      sumY += ny;
                     }
                   }
                 }
               }
-              if (size > 20 && size < 50 && size > maxSize) {
-                maxSize = size;
-                bestDot = { x, y, size };
+
+              // Calculate density (fraction of dark pixels in area)
+              density = pixelCount / ((15 * 2 + 1) * (15 * 2 + 1));
+              // Accept clusters with 20% margin from ideal density (0.5 for a rough dot)
+              if (density > 0.4 && density < 0.6 && density > maxDensity) {
+                maxDensity = density;
+                bestDot = { x: sumX / pixelCount, y: sumY / pixelCount, density };
               }
             }
           }
@@ -191,6 +201,7 @@
 
         if (bestDot) {
           corners.push({ x: bestDot.x, y: bestDot.y });
+          // Draw detected dot on overlay
           overlayCtx.fillStyle = "rgba(255, 255, 0, 0.5)";
           overlayCtx.fillRect(bestDot.x - 5, bestDot.y - 5, 10, 10);
         }
@@ -265,6 +276,7 @@
           const py = (1 - t) * ((1 - u) * tl.y + u * bl.y) + t * ((1 - u) * tr.y + u * br.y);
           const boxW = wStep;
           const boxH = hStep;
+          // Draw grid on overlay
           overlayCtx.strokeStyle = "rgba(0, 255, 255, 0.3)";
           overlayCtx.strokeRect(px, py, boxW, boxH);
           boxes.push({ x: px, y: py, w: boxW, h: boxH });
